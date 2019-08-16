@@ -1,31 +1,127 @@
-language: cpp
+matrix:
+  include:
+  - os: linux
+    dist: bionic
+    sudo: required
+    language: cpp
+    env: 
+      LIB_EXT=so
+      LIB_NAME=libGameNetworkingSockets
+  - os: windows
+    language: cpp
+    env: 
+      LIB_EXT=dll
+      LIB_NAME=GameNetworkingSockets
 
-sudo: required
-
-services:
-  - docker
-
-compiler:
-  - gcc
-  - clang
-
-env:
-  - IMAGE=ubuntu IMAGE_TAG=latest
-  - IMAGE=ubuntu IMAGE_TAG=rolling
-  - IMAGE=ubuntu IMAGE_TAG=devel
-  - IMAGE=fedora IMAGE_TAG=latest
-  - IMAGE=fedora IMAGE_TAG=rawhide
-
-before_install:
-  - export CONTAINER=${IMAGE}-${IMAGE_TAG}
-  - docker run -d --cap-add SYS_PTRACE --name $CONTAINER -e LC_ALL="en_US.UTF-8" -e LANG="en_US.UTF-8" -v $(pwd):/travis -w /travis $IMAGE:$IMAGE_TAG tail -f /dev/null
-  - docker ps
-
-install:
-  - docker exec -e CC=$CC -e CXX=$CXX -t $CONTAINER bash .travis/install-$IMAGE.sh
-  - docker exec -e CC=$CC -e CXX=$CXX -t $CONTAINER bash .travis/install-post.sh
-
+    
 script:
-  - docker exec -e CC=$CC -e CXX=$CXX -t $CONTAINER bash .travis/script.sh
+  - > 
+    echo "Build on $TRAVIS_OS_NAME"; 
+    if [ "$TRAVIS_OS_NAME" = "windows" ];  
+    then  
+      choco install ninja 7zip cmake;
+    elif [ "$TRAVIS_OS_NAME" = "osx" ]; then
+      brew install openssl@1.1 ninja p7zip;
+    else
+      sudo apt update;
+      sudo apt install -y libssl-dev ninja-build p7zip-full;
+    fi;
+    mkdir -p dist;
 
-# vim: set ts=2 sts=2 sw=2 et:
+    git clone https://github.com/google/protobuf ;
+    cd protobuf ;
+    git checkout -t origin/3.5.x ;
+    mkdir cmake_build ;
+    cd cmake_build ;
+    
+    args="";
+
+    if [ "$TRAVIS_OS_NAME" = "windows" ];  
+    then
+      echo "echo on"  > build.bat;
+      echo "echo Build dependency=protobuf" >> build.bat ; 
+      echo 'call "C:\\Program Files (x86)\\Microsoft Visual Studio\\2017\\BuildTools\\VC\\Auxiliary\\Build\\vcvarsall.bat" amd64' >> build.bat;
+      echo 'cmake -G Ninja -DCMAKE_C_COMPILER="cl" -DCMAKE_C_COMPILER_FORCED=ON -DCMAKE_CXX_COMPILER="cl" -DCMAKE_CXX_COMPILER_FORCED=ON -DCMAKE_BUILD_TYPE=Release  -DCMAKE_POSITION_INDEPENDENT_CODE=ON  -Dprotobuf_BUILD_TESTS=OFF -Dprotobuf_BUILD_SHARED_LIBS=ON -DCMAKE_INSTALL_PREFIX="%cd%\\..\\..\\protobuf-amd64" ..\\cmake' >> build.bat ;
+      echo 'ninja' >> build.bat ;
+      echo 'ninja install' >> build.bat ;
+      chmod +x build.bat ;
+      cat ./build.bat ;
+      ./build.bat  ; 
+    else
+      cmake -G Ninja -DCMAKE_BUILD_TYPE=Release  -DCMAKE_POSITION_INDEPENDENT_CODE=ON  -Dprotobuf_BUILD_TESTS=OFF -Dprotobuf_BUILD_SHARED_LIBS=ON -DCMAKE_INSTALL_PREFIX=$PWD/../../protobuf-amd64 ../cmake ;
+      ninja;
+      ninja install;
+    fi;
+    cd ../../;
+  - mkdir -p build
+
+  - mkdir -p build/dist
+
+  - ls ./protobuf-amd64/bin/ || true
+  - ls ./protobuf-amd64/lib/ || true
+
+  - cp ./protobuf-amd64/bin/*.$LIB_EXT ./build/dist/ || true 
+  - cp ./protobuf-amd64/lib/*.$LIB_EXT ./build/dist/ || true
+
+  - cd build
+ 
+  - >
+    if [ "$TRAVIS_OS_NAME" = "windows" ];  then 
+      echo "echo on"  > build.bat;
+      echo "echo Build library" >> build.bat ; 
+      echo 'call "C:\\Program Files (x86)\\Microsoft Visual Studio\\2017\\BuildTools\\VC\\Auxiliary\\Build\\vcvarsall.bat" amd64' >> build.bat;
+      echo 'echo Path %PATH%' >> build.bat ;
+      echo 'set PATH=%PATH%;%cd%\\..\\protobuf-amd64\\bin' >> build.bat ;
+      echo 'echo Path %PATH%' >> build.bat ;
+      echo 'cmake -G Ninja  -DCMAKE_BUILD_TYPE=Release  -DUSE_BCRYPT=true -DCMAKE_C_COMPILER="cl" -DCMAKE_C_COMPILER_FORCED=ON -DCMAKE_CXX_COMPILER="cl" -DCMAKE_CXX_COMPILER_FORCED=ON  -DProtobuf_USE_STATIC_LIBS=false  ..' >> build.bat ;
+      echo 'ninja' >> build.bat ;
+      chmod +x build.bat ;
+      cat ./build.bat ;
+      ./build.bat  ; 
+    elif [ "$TRAVIS_OS_NAME" = "osx" ]; then
+      export PATH="$PATH:$PWD/../protobuf-amd64/bin";
+      export LD_LIBRARY_PATH="$LD_LIBRARY_PATH:$PWD/../protobuf-amd64/lib/"
+      export PKG_CONFIG_PATH=$PKG_CONFIG_PATH:/usr/local/opt/openssl@1.1/lib/pkgconfig;
+      cmake -G Ninja -DCMAKE_BUILD_TYPE=Release  -DProtobuf_INCLUDE_DIR=$PWD/../protobuf-amd64/include -DProtobuf_LIBRARY=$PWD/../protobuf-amd64/lib/libprotobuf.$LIB_EXT -DProtobuf_USE_STATIC_LIBS=false ..;
+      ninja;
+    else
+      export PATH="$PATH:$PWD/../protobuf-amd64/bin";
+      export LD_LIBRARY_PATH="$LD_LIBRARY_PATH:$PWD/../protobuf-amd64/lib/"
+      cmake -G Ninja  -DCMAKE_BUILD_TYPE=Release  -DProtobuf_INCLUDE_DIR=$PWD/../protobuf-amd64/include -DProtobuf_LIBRARY=$PWD/../protobuf-amd64/lib/libprotobuf.$LIB_EXT -DProtobuf_USE_STATIC_LIBS=false ..;
+      ninja;
+    fi
+  
+  - ls .
+
+  - cp src/*.$LIB_EXT ./dist/
+  - ls ./dist
+  
+  - rm -Rf examples/CMakeFiles
+  - rm -Rf examples/*.cmake
+  - cp -Rf dist/* examples/
+  - ls ./examples/
+
+  - rm -Rf tests/CMakeFiles
+  - rm -Rf tests/*.cmake
+  - cp -Rf dist/* tests/
+  - ls ./tests/
+
+  - 7z a -r "examples-GameNetworkingSockets-$TRAVIS_OS_NAME.zip" examples/*
+  - 7z a -r "GameNetworkingSockets-$TRAVIS_OS_NAME.zip" dist/*
+  - 7z a -r "tests-GameNetworkingSockets-$TRAVIS_OS_NAME.zip" tests/*
+
+  - cd ..
+
+  - ls build
+deploy:
+  provider: releases
+  api_key:
+    secure: hFR4AYfknUFoWiQVjilDsHYNmdgWhSdREdDpODx3XMeGVAJtj9QO492ea+QuhhdYNMQLXd+EhcgEX9xZPe5H0U2igxdXSfesbh7HDkuvpM5aiLOW0sVZNHQnepcuT7rqgCg0sdim/f8wfT0+rmkOOmtVgJkDTcDdo4SsJbnSTAsqa8a6WGaQUbaLPHPQZ/SnycM99QY6Pzl4BPlykPAVQeXmlbuFJLlNCyMGz7r4y0g1fVf9f+yot6JGjxd7B7ElDxPEba2PPVJVVmNLcF+No9YP2vKXffqRE4ljuABNvtZ+m6qgXB7teFXdVkuKHY+PjUjsg5D6gpSy0lmhs2PEvCtanNV6Bmq28wKil7Y+5BHBiifK/CxkR9ccOBOWbHNnns28Gycc2itfYgJqYiCaFQHwuKFcm6Z1y2um2BEYyWCJhpuLw7xNia1BnI+WQIuDmJ/N6r/Qpzag7AbKeJwYjAL5i4BWo0TRkzk6rlTVyc9mo7kvFSdsIo5Hi2+x5iJDwdWzZrPoca+GwGP1EyeHnHQEbpG5OLahfw2/fxxMkZBVTDxT85pdLkisiEJ0meCOMoHZw9doNSBC2WoLwrAMziC4eQ/OX7zE4Mo6Luhv/IScSp0PmgQcO4ECGriZxWAHt91t8OwmktryHAUjL+mUYSFTYaYQQL6utg40o3bYJ9M=
+  file: 
+    - "build/examples-GameNetworkingSockets-$TRAVIS_OS_NAME.zip"
+    - "build/GameNetworkingSockets-$TRAVIS_OS_NAME.zip"
+    - "build/tests-GameNetworkingSockets-$TRAVIS_OS_NAME.zip"
+  skip_cleanup: true
+  on:
+    tags: true
+    repo: riccardobl/GameNetworkingSockets
