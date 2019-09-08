@@ -130,7 +130,7 @@ CSteamNetworkListenSocketDirectUDP::~CSteamNetworkListenSocketDirectUDP()
 	}
 }
 
-bool CSteamNetworkListenSocketDirectUDP::BInit( const SteamNetworkingIPAddr &localAddr, SteamDatagramErrMsg &errMsg )
+bool CSteamNetworkListenSocketDirectUDP::BInit( const SteamNetworkingIPAddr &localAddr, int nOptions, const SteamNetworkingConfigValue_t *pOptions, SteamDatagramErrMsg &errMsg )
 {
 	Assert( m_pSock == nullptr );
 
@@ -139,6 +139,10 @@ bool CSteamNetworkListenSocketDirectUDP::BInit( const SteamNetworkingIPAddr &loc
 		V_strcpy_safe( errMsg, "Must specify local port." );
 		return false;
 	}
+
+	// Set options, add us to the global table
+	if ( !BInitListenSocketCommon( nOptions, pOptions, errMsg ) )
+		return false;
 
 	m_pSock = new CSharedSocket;
 	if ( !m_pSock->BInit( localAddr, CRecvPacketCallback( ReceivedFromUnknownHost, this ), errMsg ) )
@@ -337,7 +341,7 @@ void CSteamNetworkListenSocketDirectUDP::Received_ConnectRequest( const CMsgStea
 		{
 			// No identity in the cert.  Check if they put it directly in the connect message
 			bIdentityInCert = false;
-			r = SteamNetworkingIdentityFromProtobuf( identityRemote, msg, identity, legacy_client_steam_id, errMsg );
+			r = SteamNetworkingIdentityFromProtobuf( identityRemote, msg, identity_string, legacy_identity_binary, legacy_client_steam_id, errMsg );
 			if ( r < 0 )
 			{
 				ReportBadPacket( "ConnectRequest", "Bad identity.  %s", errMsg );
@@ -434,7 +438,16 @@ void CSteamNetworkListenSocketDirectUDP::Received_ConnectRequest( const CMsgStea
 
 	// Did they send us a ping estimate?
 	if ( msg.has_ping_est_ms() )
-		pConn->m_statsEndToEnd.m_ping.ReceivedPing( msg.ping_est_ms(), usecNow );
+	{
+		if ( msg.ping_est_ms() > 1500 )
+		{
+			SpewWarning( "[%s] Ignoring really large ping estimate %u in connect request", pConn->GetDescription(), msg.has_ping_est_ms() );
+		}
+		else
+		{
+			pConn->m_statsEndToEnd.m_ping.ReceivedPing( msg.ping_est_ms(), usecNow );
+		}
+	}
 
 	// Save of timestamp that we will use to reply to them when the application
 	// decides to accept the connection
@@ -596,13 +609,13 @@ void CSteamNetworkConnectionUDP::PopulateSendPacketContext( UDPSendPacketContext
 			nFlags |= ctx.msg.ACK_REQUEST_E2E;
 
 		ctx.SlamFlagsAndCalcSize();
-		ctx.CalcMaxEncryptedPayloadSize( sizeof(UDPDataMsgHdr) );
+		ctx.CalcMaxEncryptedPayloadSize( sizeof(UDPDataMsgHdr), this );
 	}
 	else
 	{
 		// Populate flags now, based on what is implied from what we HAVE to send
 		ctx.SlamFlagsAndCalcSize();
-		ctx.CalcMaxEncryptedPayloadSize( sizeof(UDPDataMsgHdr) );
+		ctx.CalcMaxEncryptedPayloadSize( sizeof(UDPDataMsgHdr), this );
 
 		// Would we like to try to send some additional stats, if there is room?
 		if ( m_statsEndToEnd.BReadyToSendStats( usecNow ) )
@@ -725,7 +738,7 @@ int CSteamNetworkConnectionUDP::SendEncryptedDataChunk( const void *pChunk, int 
 	return cbSend;
 }
 
-bool CSteamNetworkConnectionUDP::BInitConnect( const SteamNetworkingIPAddr &addressRemote, SteamDatagramErrMsg &errMsg )
+bool CSteamNetworkConnectionUDP::BInitConnect( const SteamNetworkingIPAddr &addressRemote, int nOptions, const SteamNetworkingConfigValue_t *pOptions, SteamDatagramErrMsg &errMsg )
 {
 	AssertMsg( !m_pSocket, "Trying to connect when we already have a socket?" );
 
@@ -772,7 +785,7 @@ bool CSteamNetworkConnectionUDP::BInitConnect( const SteamNetworkingIPAddr &addr
 
 	// Let base class do some common initialization
 	SteamNetworkingMicroseconds usecNow = SteamNetworkingSockets_GetLocalTimestamp();
-	if ( !CSteamNetworkConnectionBase::BInitConnection( usecNow, errMsg ) )
+	if ( !CSteamNetworkConnectionBase::BInitConnection( usecNow, nOptions, pOptions, errMsg ) )
 	{
 		m_pSocket->Close();
 		m_pSocket = nullptr;
@@ -886,7 +899,7 @@ bool CSteamNetworkConnectionUDP::BBeginAccept(
 
 	// Let base class do some common initialization
 	SteamNetworkingMicroseconds usecNow = SteamNetworkingSockets_GetLocalTimestamp();
-	if ( !CSteamNetworkConnectionBase::BInitConnection( usecNow, errMsg ) )
+	if ( !CSteamNetworkConnectionBase::BInitConnection( usecNow, 0, nullptr, errMsg ) )
 	{
 		m_pSocket->Close();
 		m_pSocket = nullptr;
@@ -1325,7 +1338,7 @@ void CSteamNetworkConnectionUDP::Received_ChallengeReply( const CMsgSteamSockets
 	// If the cert is generic, then we need to specify our identity
 	if ( !m_bCertHasIdentity )
 	{
-		SteamNetworkingIdentityToProtobuf( m_identityLocal, msgConnectRequest, identity, legacy_client_steam_id );
+		SteamNetworkingIdentityToProtobuf( m_identityLocal, msgConnectRequest, identity_string, legacy_identity_binary, legacy_client_steam_id );
 	}
 	else
 	{
@@ -1383,7 +1396,7 @@ void CSteamNetworkConnectionUDP::Received_ConnectOK( const CMsgSteamSockets_UDP_
 		{
 			// No identity in the cert.  Check if they put it directly in the connect message
 			bIdentityInCert = false;
-			r = SteamNetworkingIdentityFromProtobuf( identityRemote, msg, identity, legacy_server_steam_id, errMsg );
+			r = SteamNetworkingIdentityFromProtobuf( identityRemote, msg, identity_string, legacy_identity_binary, legacy_server_steam_id, errMsg );
 			if ( r < 0 )
 			{
 				ReportBadPacketIPv4( "ConnectRequest", "Bad identity.  %s", errMsg );
@@ -1661,7 +1674,7 @@ void CSteamNetworkConnectionUDP::SendConnectOK( SteamNetworkingMicroseconds usec
 	// If the cert is generic, then we need to specify our identity
 	if ( !m_bCertHasIdentity )
 	{
-		SteamNetworkingIdentityToProtobuf( m_identityLocal, msg, identity, legacy_server_steam_id );
+		SteamNetworkingIdentityToProtobuf( m_identityLocal, msg, identity_string, legacy_identity_binary, legacy_server_steam_id );
 	}
 	else
 	{
@@ -1782,8 +1795,11 @@ failed:
 	for ( int i = 0 ; i < 2 ; ++i )
 	{
 		pConn[i]->m_pSocket = sock[i];
-		if ( !pConn[i]->BInitConnection( usecNow, errMsg ) )
+		if ( !pConn[i]->BInitConnection( usecNow, 0, nullptr, errMsg ) )
+		{
+			AssertMsg1( false, "CSteamNetworkConnectionlocalhostLoopback::BInitConnection failed.  %s", errMsg );
 			goto failed;
+		}
 	}
 
 	// Tie the connections to each other, and mark them as connected

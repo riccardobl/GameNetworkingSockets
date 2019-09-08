@@ -250,6 +250,69 @@ CSteamNetworkListenSocketBase::CSteamNetworkListenSocketBase( CSteamNetworkingSo
 CSteamNetworkListenSocketBase::~CSteamNetworkListenSocketBase()
 {
 	AssertMsg( m_mapChildConnections.Count() == 0 && !m_queueRecvMessages.m_pFirst && !m_queueRecvMessages.m_pLast, "Destroy() not used properly" );
+
+	// Remove us from global table, if we're in it
+	if ( m_hListenSocketSelf != k_HSteamListenSocket_Invalid )
+	{
+		int idx = m_hListenSocketSelf & 0xffff;
+		if ( g_mapListenSockets.IsValidIndex( idx ) && g_mapListenSockets[ idx ] == this )
+		{
+			g_mapListenSockets[ idx ] = nullptr; // Just for grins
+			g_mapListenSockets.RemoveAt( idx );
+		}
+		else
+		{
+			AssertMsg( false, "Listen socket handle bookkeeping bug!" );
+		}
+
+		m_hListenSocketSelf = k_HSteamListenSocket_Invalid;
+	}
+}
+
+bool CSteamNetworkListenSocketBase::BInitListenSocketCommon( int nOptions, const SteamNetworkingConfigValue_t *pOptions, SteamDatagramErrMsg &errMsg )
+{
+	Assert( m_hListenSocketSelf == k_HSteamListenSocket_Invalid );
+
+	// Assign us a handle, and add us to the global table
+	{
+		// We actually don't do map "lookups".  We assume the number of listen sockets
+		// is going to be reasonably small.
+		static int s_nDummy;
+		++s_nDummy;
+		int idx = g_mapListenSockets.Insert( s_nDummy, this );
+		Assert( idx < 0x1000 );
+
+		// Use upper 16 bits as a connection sequence number, so that listen socket handles
+		// are not reused within a short time period.
+		static uint32 s_nUpperBits = 0;
+		s_nUpperBits += 0x10000;
+		if ( s_nUpperBits == 0 )
+			s_nUpperBits = 0x10000;
+
+		// Add it to our table of listen sockets
+		m_hListenSocketSelf = HSteamListenSocket( idx | s_nUpperBits );
+	}
+
+	// Set options, if any
+	if ( pOptions )
+	{
+		for ( int i = 0 ; i < nOptions ; ++i )
+		{
+			if ( !m_pSteamNetworkingSocketsInterface->m_pSteamNetworkingUtils->SetConfigValueStruct( pOptions[i], k_ESteamNetworkingConfig_ListenSocket, m_hListenSocketSelf ) )
+			{
+				V_sprintf_safe( errMsg, "Error setting option %d", pOptions[i].m_eValue );
+				return false;
+			}
+		}
+	}
+	else if ( nOptions != 0 )
+	{
+		V_strcpy_safe( errMsg, "Options list is NULL, but nOptions != 0?" );
+		return false;
+	}
+
+	// OK
+	return true;
 }
 
 void CSteamNetworkListenSocketBase::Destroy()
@@ -294,6 +357,7 @@ void CSteamNetworkListenSocketBase::AddChildConnection( CSteamNetworkConnectionB
 	// Setup linkage
 	pConn->m_pParentListenSocket = this;
 	pConn->m_hSelfInParentListenSocketMap = m_mapChildConnections.Insert( key, pConn );
+	pConn->m_bConnectionInitiatedRemotely = true;
 
 	// Connection configuration will inherit from us
 	pConn->m_connectionConfig.Init( &m_connectionConfig );
@@ -354,6 +418,7 @@ CSteamNetworkConnectionBase::CSteamNetworkConnectionBase( CSteamNetworkingSocket
 	m_bCryptKeysValid = false;
 	memset( m_szAppName, 0, sizeof( m_szAppName ) );
 	memset( m_szDescription, 0, sizeof( m_szDescription ) );
+	m_bConnectionInitiatedRemotely = false;
 
 	// Initialize configuration using parent interface for now.
 	m_connectionConfig.Init( &m_pSteamNetworkingSocketsInterface->m_connectionConfig );
@@ -444,8 +509,11 @@ void CSteamNetworkConnectionBase::FreeResources()
 	}
 }
 
-bool CSteamNetworkConnectionBase::BInitConnection( SteamNetworkingMicroseconds usecNow, SteamDatagramErrMsg &errMsg )
+bool CSteamNetworkConnectionBase::BInitConnection( SteamNetworkingMicroseconds usecNow, int nOptions, const SteamNetworkingConfigValue_t *pOptions, SteamDatagramErrMsg &errMsg )
 {
+	// Make sure MTU values are initialized
+	UpdateMTUFromConfig();
+
 	// We make sure the lower 16 bits are unique.  Make sure we don't have too many connections.
 	// This definitely could be relaxed, but honestly we don't expect this library to be used in situations
 	// where you need that many connections.
@@ -512,6 +580,24 @@ bool CSteamNetworkConnectionBase::BInitConnection( SteamNetworkingMicroseconds u
 
 	// Add it to our table of active sockets.
 	g_mapConnections.Insert( int16( m_hConnectionSelf ), this );
+
+	// Set options, if any
+	if ( pOptions )
+	{
+		for ( int i = 0 ; i < nOptions ; ++i )
+		{
+			if ( !m_pSteamNetworkingSocketsInterface->m_pSteamNetworkingUtils->SetConfigValueStruct( pOptions[i], k_ESteamNetworkingConfig_Connection, m_hConnectionSelf ) )
+			{
+				V_sprintf_safe( errMsg, "Error setting option %d", pOptions[i].m_eValue );
+				return false;
+			}
+		}
+	}
+	else if ( nOptions != 0 )
+	{
+		V_strcpy_safe( errMsg, "Options list is NULL, but nOptions != 0?" );
+		return false;
+	}
 
 	// Make sure a description has been set for debugging purposes
 	SetDescription();
@@ -690,8 +776,8 @@ void CSteamNetworkConnectionBase::InitLocalCryptoWithUnsignedCert()
 	CMsgSteamDatagramCertificate msgCert;
 	keyPublic.GetRawDataAsStdString( msgCert.mutable_key_data() );
 	msgCert.set_key_type( CMsgSteamDatagramCertificate_EKeyType_ED25519 );
-	SteamNetworkingIdentityToProtobuf( m_identityLocal, msgCert, identity, legacy_steam_id );
-	msgCert.add_app_ids( m_pSteamNetworkingSocketsInterface->m_nAppID );
+	SteamNetworkingIdentityToProtobuf( m_identityLocal, msgCert, identity_string, legacy_identity_binary, legacy_steam_id );
+	msgCert.add_app_ids( m_pSteamNetworkingSocketsInterface->m_pSteamNetworkingUtils->GetAppID() );
 
 	// Should we set an expiry?  I mean it's unsigned, so it has zero value, so probably not
 	//s_msgCertLocal.set_time_created( );
@@ -732,6 +818,7 @@ void CSteamNetworkConnectionBase::CertRequestFailed( ESteamNetConnectionEnd nCon
 
 bool CSteamNetworkConnectionBase::BRecvCryptoHandshake( const CMsgSteamDatagramCertificateSigned &msgCert, const CMsgSteamDatagramSessionCryptInfoSigned &msgSessionInfo, bool bServer )
 {
+	SteamDatagramTransportLock::AssertHeldByCurrentThread( "BRecvCryptoHandshake" );
 	SteamNetworkingErrMsg errMsg;
 
 	// Have we already done key exchange?
@@ -754,7 +841,7 @@ bool CSteamNetworkConnectionBase::BRecvCryptoHandshake( const CMsgSteamDatagramC
 	{
 
 		// Check the signature and chain of trust, and expiry, and deserialize the signed cert
-		time_t timeNow = m_pSteamNetworkingSocketsInterface->GetTimeSecure();
+		time_t timeNow = m_pSteamNetworkingSocketsInterface->m_pSteamNetworkingUtils->GetTimeSecure();
 		pCACertAuthScope = CertStore_CheckCert( msgCert, m_msgCertRemote, timeNow, errMsg );
 		if ( !pCACertAuthScope )
 		{
@@ -786,7 +873,7 @@ bool CSteamNetworkConnectionBase::BRecvCryptoHandshake( const CMsgSteamDatagramC
 	if ( rIdentity > 0 && !identityCert.IsLocalHost() )
 	{
 
-		// They sent an identity.  Then it must match the dentity we expect!
+		// They sent an identity.  Then it must match the identity we expect!
 		if ( !( identityCert == m_identityRemote ) )
 		{
 			ConnectionState_ProblemDetectedLocally( k_ESteamNetConnectionEnd_Remote_BadCert, "Cert was issued to %s, not %s",
@@ -1029,7 +1116,7 @@ ESteamNetConnectionEnd CSteamNetworkConnectionBase::CheckRemoteCert( const CertA
 {
 
 	// Allowed for this app?
-	if ( !CheckCertAppID( m_msgCertRemote, pCACertAuthScope, m_pSteamNetworkingSocketsInterface->m_nAppID, errMsg ) )
+	if ( !CheckCertAppID( m_msgCertRemote, pCACertAuthScope, m_pSteamNetworkingSocketsInterface->m_pSteamNetworkingUtils->GetAppID(), errMsg ) )
 		return k_ESteamNetConnectionEnd_Remote_BadCert;
 
 	// Check if we don't allow unsigned certs
@@ -1824,7 +1911,7 @@ void CSteamNetworkConnectionBase::CheckConnectionStateAndSetNextThinkTime( Steam
 				{
 					ConnectionTimedOut( usecNow );
 				}
-				AssertMsg( GetState() == k_ESteamNetworkingConnectionState_ProblemDetectedLocally, "ConnectionTimedOut didn't do what it is supposed to!" );
+				AssertMsg2( GetState() == k_ESteamNetworkingConnectionState_ProblemDetectedLocally, "[%s] ConnectionTimedOut didn't do what it is supposed to, state=%d!", GetDescription(), (int)GetState() );
 				return;
 			}
 
@@ -1893,39 +1980,74 @@ void CSteamNetworkConnectionBase::CheckConnectionStateAndSetNextThinkTime( Steam
 
 	// Update stats
 	m_statsEndToEnd.Think( usecNow );
+	UpdateMTUFromConfig();
 
 	// Check for sending keepalives or probing a connection that appears to be timing out
 	if ( m_eConnectionState != k_ESteamNetworkingConnectionState_Connecting && m_eConnectionState != k_ESteamNetworkingConnectionState_FindingRoute )
 	{
 		Assert( m_statsEndToEnd.m_usecTimeLastRecv > 0 ); // How did we get connected without receiving anything end-to-end?
+		AssertMsg2( !m_statsEndToEnd.IsDisconnected(), "[%s] stats disconnected, but in state %d?", GetDescription(), (int)GetState() );
 
-		SteamNetworkingMicroseconds usecEndToEndConnectionTimeout = m_statsEndToEnd.m_usecTimeLastRecv + (SteamNetworkingMicroseconds)m_connectionConfig.m_TimeoutConnected.Get()*1000;
-		if ( usecNow >= usecEndToEndConnectionTimeout )
+		// Not able to send end-to-end data?
+		bool bCanSendEndToEnd = BCanSendEndToEndData();
+
+		// Mark us as "timing out" if we are not able to send end-to-end data
+		if ( !bCanSendEndToEnd && m_statsEndToEnd.m_usecWhenTimeoutStarted == 0 )
+			m_statsEndToEnd.m_usecWhenTimeoutStarted = usecNow;
+
+		// Are we timing out?
+		if ( m_statsEndToEnd.m_usecWhenTimeoutStarted > 0 )
 		{
-			if ( m_statsEndToEnd.m_nReplyTimeoutsSinceLastRecv >= 4 || !BCanSendEndToEndData() )
+
+			// When will the timeout hit?
+			SteamNetworkingMicroseconds usecEndToEndConnectionTimeout = std::max( m_statsEndToEnd.m_usecWhenTimeoutStarted, m_statsEndToEnd.m_usecTimeLastRecv ) + (SteamNetworkingMicroseconds)m_connectionConfig.m_TimeoutConnected.Get()*1000;
+
+			// Time to give up?
+			if ( usecNow >= usecEndToEndConnectionTimeout )
 			{
-				ConnectionTimedOut( usecNow );
-				AssertMsg( GetState() == k_ESteamNetworkingConnectionState_ProblemDetectedLocally, "ConnectionTimedOut didn't do what it is supposed to!" );
-				return;
+				if ( m_statsEndToEnd.m_nReplyTimeoutsSinceLastRecv >= 4 || !bCanSendEndToEnd )
+				{
+					if ( bCanSendEndToEnd )
+					{
+						Assert( m_statsEndToEnd.m_usecWhenTimeoutStarted > 0 );
+						SpewMsg( "[%s] Timed out.  %.1fms since last recv, %.1fms since timeout started, %d consecutive failures\n",
+							GetDescription(), ( usecNow - m_statsEndToEnd.m_usecTimeLastRecv ) * 1e-3, ( usecNow - m_statsEndToEnd.m_usecWhenTimeoutStarted ) * 1e-3, m_statsEndToEnd.m_nReplyTimeoutsSinceLastRecv );
+					}
+					else
+					{
+						SpewMsg( "[%s] Timed out.  Cannot send end-to-end.  %.1fms since last recv, %d consecutive failures\n",
+							GetDescription(), ( usecNow - m_statsEndToEnd.m_usecTimeLastRecv ) * 1e-3, m_statsEndToEnd.m_nReplyTimeoutsSinceLastRecv );
+					}
+
+					// Save state for assert
+					#ifdef DBGFLAG_ASSERT
+					ESteamNetworkingConnectionState eOldState = GetState();
+					#endif
+
+					// Check for connection-type-specific handling
+					ConnectionTimedOut( usecNow );
+
+					// Make sure that worked
+					AssertMsg3(
+						GetState() == k_ESteamNetworkingConnectionState_ProblemDetectedLocally
+						|| ( eOldState == k_ESteamNetworkingConnectionState_Linger && GetState() == k_ESteamNetworkingConnectionState_FinWait ),
+						"[%s] ConnectionTimedOut didn't do what it is supposed to! (%d -> %d)", GetDescription(), (int)eOldState, (int)GetState() );
+					return;
+				}
 			}
-			// The timeout time has expired, but we haven't marked enough packets as dropped yet?
-			// Hm, this is weird, probably our aggressive pinging code isn't working or something.
-			// In any case, just check in a bit
-			UpdateMinThinkTime( usecNow + 100*1000, +100 );
-		}
-		else
-		{
-			UpdateMinThinkTime( usecEndToEndConnectionTimeout, +100 );
+
+			// Make sure we are waking up regularly to check in while this is going on
+			UpdateMinThinkTime( usecNow + 50*1000, +100 );
 		}
 
 		// Check for keepalives of varying urgency.
 		// Ping aggressively because connection appears to be timing out?
-		if ( m_statsEndToEnd.m_nReplyTimeoutsSinceLastRecv > 0 )
+		if ( m_statsEndToEnd.m_nReplyTimeoutsSinceLastRecv > 0 || m_statsEndToEnd.m_usecWhenTimeoutStarted > 0 )
 		{
 			SteamNetworkingMicroseconds usecSendAggressivePing = Max( m_statsEndToEnd.m_usecTimeLastRecv, m_statsEndToEnd.m_usecLastSendPacketExpectingImmediateReply ) + k_usecAggressivePingInterval;
 			if ( usecNow >= usecSendAggressivePing )
 			{
-				if ( BCanSendEndToEndData() )
+				if ( bCanSendEndToEnd )
 				{
 					if ( m_statsEndToEnd.m_nReplyTimeoutsSinceLastRecv == 1 )
 						SpewVerbose( "[%s] Reply timeout, last recv %.1fms ago.  Sending keepalive.\n", GetDescription(), ( usecNow - m_statsEndToEnd.m_usecTimeLastRecv ) * 1e-3 );
@@ -1934,7 +2056,7 @@ void CSteamNetworkConnectionBase::CheckConnectionStateAndSetNextThinkTime( Steam
 					Assert( m_statsEndToEnd.BNeedToSendPingImmediate( usecNow ) ); // Make sure logic matches
 					SendEndToEndStatsMsg( k_EStatsReplyRequest_Immediate, usecNow, "E2ETimingOutKeepalive" );
 					AssertMsg( !m_statsEndToEnd.BNeedToSendPingImmediate( usecNow ), "SendEndToEndStatsMsg didn't do its job!" );
-					Assert( m_statsEndToEnd.m_usecInFlightReplyTimeout != 0 );
+					Assert( m_statsEndToEnd.m_usecInFlightReplyTimeout > 0 );
 				}
 				else
 				{
@@ -1958,7 +2080,7 @@ void CSteamNetworkConnectionBase::CheckConnectionStateAndSetNextThinkTime( Steam
 			SteamNetworkingMicroseconds usecSendKeepalive = m_statsEndToEnd.m_usecTimeLastRecv+k_usecKeepAliveInterval;
 			if ( usecNow >= usecSendKeepalive )
 			{
-				if ( BCanSendEndToEndData() )
+				if ( bCanSendEndToEnd )
 				{
 					Assert( m_statsEndToEnd.BNeedToSendKeepalive( usecNow ) ); // Make sure logic matches
 					SendEndToEndStatsMsg( k_EStatsReplyRequest_DelayedOK, usecNow, "E2EKeepalive" );
@@ -1975,6 +2097,10 @@ void CSteamNetworkConnectionBase::CheckConnectionStateAndSetNextThinkTime( Steam
 				// Not right now, but schedule a wakeup call to do it
 				UpdateMinThinkTime( usecSendKeepalive, +100 );
 			}
+		}
+		else
+		{
+			UpdateMinThinkTime( m_statsEndToEnd.m_usecInFlightReplyTimeout, +10 );
 		}
 	}
 
@@ -2045,6 +2171,40 @@ void CSteamNetworkConnectionBase::UpdateSpeeds( int nTXSpeed, int nRXSpeed )
 	m_statsEndToEnd.UpdateSpeeds( nTXSpeed, nRXSpeed );
 }
 
+void CSteamNetworkConnectionBase::UpdateMTUFromConfig()
+{
+	int newMTUPacketSize = m_connectionConfig.m_MTU_PacketSize.Get();
+	if ( newMTUPacketSize == m_cbMTUPacketSize )
+		return;
+
+	// Shrinking MTU?
+	if ( newMTUPacketSize < m_cbMTUPacketSize )
+	{
+		// We cannot do this while we have any reliable segments in flight!
+		// To keep things simple, the retries are always the original ranges,
+		// we never have our retries chop up the space differently than
+		// the original send
+		if ( !m_senderState.m_listReadyRetryReliableRange.empty() || !m_senderState.m_listInFlightReliableRange.empty() )
+			return;
+	}
+
+	m_cbMTUPacketSize = m_connectionConfig.m_MTU_PacketSize.Get();
+	m_cbMaxPlaintextPayloadSend = m_cbMTUPacketSize - ( k_cbSteamNetworkingSocketsMaxUDPMsgLen - k_cbSteamNetworkingSocketsMaxPlaintextPayloadSend );
+	m_cbMaxMessageNoFragment = m_cbMaxPlaintextPayloadSend - k_cbSteamNetworkingSocketsNoFragmentHeaderReserve;
+
+	// Max size of a reliable segment.  This is designed such that a reliable
+	// message of size k_cbSteamNetworkingSocketsMaxMessageNoFragment
+	// won't get fragmented, except perhaps in an exceedingly degenerate
+	// case.  (Even in this case, the protocol will function properly, it
+	// will just potentially fragment the message.)  We shouldn't make any
+	// hard promises in this department.
+	//
+	// 1 byte - message header
+	// 3 bytes - varint encode msgnum gap between previous reliable message.  (Gap could be greater, but this would be really unusual.)
+	// 1 byte - size remainder bytes (assuming message is k_cbSteamNetworkingSocketsMaxMessageNoFragment, we only need a single size overflow byte)
+	m_cbMaxReliableMessageSegment = m_cbMaxMessageNoFragment + 5;
+}
+
 /////////////////////////////////////////////////////////////////////////////
 //
 // CSteamNetworkConnectionPipe
@@ -2072,8 +2232,11 @@ failed:
 	// Do generic base class initialization
 	for ( int i = 0 ; i < 2 ; ++i )
 	{
-		if ( !pConn[i]->BInitConnection( usecNow, errMsg ) )
+		if ( !pConn[i]->BInitConnection( usecNow, 0, nullptr, errMsg ) )
+		{
+			AssertMsg1( false, "CSteamNetworkConnectionPipe::BInitConnection failed.  %s", errMsg );
 			goto failed;
+		}
 
 		// Slam in a really large SNP rate
 		int nRate = 0x10000000;
@@ -2095,7 +2258,7 @@ failed:
 		p->m_unConnectionIDRemote = q->m_unConnectionIDLocal;
 		if ( !p->BRecvCryptoHandshake( q->m_msgSignedCertLocal, q->m_msgSignedCryptLocal, i==0 ) )
 		{
-			AssertMsg( false, "BRecvCryptoHandshake failed creating localhost socket pair" );
+			AssertMsg( false, "BRecvCryptoHandshake failed creating loopback pipe socket pair" );
 			goto failed;
 		}
 		p->ConnectionState_Connected( usecNow );
@@ -2119,6 +2282,12 @@ CSteamNetworkConnectionPipe::~CSteamNetworkConnectionPipe()
 void CSteamNetworkConnectionPipe::GetConnectionTypeDescription( ConnectionTypeDescription_t &szDescription ) const
 {
 	V_strcpy_safe( szDescription, "pipe" );
+}
+
+void CSteamNetworkConnectionPipe::InitConnectionCrypto( SteamNetworkingMicroseconds usecNow )
+{
+	// Always use unsigned cert, since we won't be doing any real crypto anyway
+	InitLocalCryptoWithUnsignedCert();
 }
 
 EUnsignedCert CSteamNetworkConnectionPipe::AllowRemoteUnsignedCert()
@@ -2246,7 +2415,7 @@ void CSteamNetworkConnectionPipe::ConnectionStateChanged( ESteamNetworkingConnec
 		case k_ESteamNetworkingConnectionState_FindingRoute:
 		case k_ESteamNetworkingConnectionState_ProblemDetectedLocally: // What local "problem" could we have detected??
 		default:
-			Assert( false );
+			AssertMsg1( false, "Invalid state %d", GetState() );
 		case k_ESteamNetworkingConnectionState_None:
 		case k_ESteamNetworkingConnectionState_Dead:
 		case k_ESteamNetworkingConnectionState_FinWait:

@@ -166,7 +166,7 @@ struct Cert
 		}
 
 		// We don't store certs bound to a particular identity in the cert store
-		if ( msgCert.has_legacy_steam_id() || msgCert.has_identity() )
+		if ( msgCert.has_identity_string() || msgCert.has_legacy_identity_binary() || msgCert.has_legacy_steam_id() )
 		{
 			V_strcpy_safe( errMsg, "Cert is bound to particular identity; doesn't go in the cert store" );
 			return false;
@@ -280,6 +280,12 @@ static void CertStore_OneTimeInit()
 			PublicKey *pKey = new PublicKey;
 			pKey->SlamHardcodedRootCA();
 			uint64 nKeyID = pKey->CalculateKeyID();
+
+			// Make sure calculated ID matches what we expect!
+			char checkID[64];
+			V_sprintf_safe( checkID, "ID%llu", (unsigned long long)nKeyID );
+			AssertFatal( V_stristr( STEAMNETWORKINGSOCKETS_HARDCODED_ROOT_CA_KEY, checkID ) != NULL );
+
 			s_mapPublicKeys.Insert( nKeyID, pKey );
 		}
 	#endif
@@ -351,11 +357,11 @@ bool CertStore_AddCertFromBase64( const char *pszBase64, SteamNetworkingErrMsg &
 		// using the signature as as hash/fingerprint.
 		for ( const Cert &c: pKey->m_vecCerts )
 		{
-			if ( c.m_signature == c.m_signature )
+			if ( cert.m_signature == c.m_signature )
 			{
-				Assert( c.m_signed_data == c.m_signed_data );
-				Assert( c.m_ca_key_id == c.m_ca_key_id );
-				Assert( c.m_timeCreated == c.m_timeCreated );
+				Assert( cert.m_signed_data == c.m_signed_data );
+				Assert( cert.m_ca_key_id == c.m_ca_key_id );
+				Assert( cert.m_timeCreated == c.m_timeCreated );
 				return true;
 			}
 		}

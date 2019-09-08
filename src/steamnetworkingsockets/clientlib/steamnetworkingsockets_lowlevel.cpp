@@ -31,6 +31,10 @@
 	#include <Windows.h>
 #endif
 
+#ifdef _XBOX_ONE
+	#include <combaseapi.h>
+#endif
+
 // memdbgon must be the last include file in a .cpp file!!!
 #include "tier0/memdbgon.h"
 
@@ -48,8 +52,31 @@ int SteamDatagramTransportLock::s_nLocked;
 static SteamNetworkingMicroseconds s_usecWhenLocked;
 static std::thread::id s_threadIDLockOwner;
 static int64 s_usecLongLockWarningThreshold;
+static int s_nCurrentLockTags;
+constexpr int k_nMaxCurrentLockTags = 8;
+static const char *s_pszCurrentLockTags[k_nMaxCurrentLockTags];
+static int s_nCurrentLockTagCounts[k_nMaxCurrentLockTags];
 
-void SteamDatagramTransportLock::OnLocked()
+void SteamDatagramTransportLock::AddTag( const char *pszTag )
+{
+	if ( !pszTag || s_nCurrentLockTags >= k_nMaxCurrentLockTags )
+		return;
+
+	for ( int i = 0 ; i < s_nCurrentLockTags ; ++i )
+	{
+		if ( s_pszCurrentLockTags[i] == pszTag )
+		{
+			++s_nCurrentLockTagCounts[ i ];
+			return;
+		}
+	}
+
+	s_pszCurrentLockTags[ s_nCurrentLockTags ] = pszTag;
+	s_nCurrentLockTagCounts[ s_nCurrentLockTags ] = 0;
+	++s_nCurrentLockTags;
+}
+
+void SteamDatagramTransportLock::OnLocked( const char *pszTag )
 {
 	++s_nLocked;
 	if ( s_nLocked == 1 )
@@ -59,10 +86,12 @@ void SteamDatagramTransportLock::OnLocked()
 
 		// By default, complain if we hold the lock for more than this long
 		s_usecLongLockWarningThreshold = 20*1000;
+		s_nCurrentLockTags = 0;
 	}
+	AddTag( pszTag );
 }
 
-void SteamDatagramTransportLock::Lock()
+void SteamDatagramTransportLock::Lock( const char *pszTag )
 {
 	#ifdef MSVC_STL_MUTEX_WORKAROUND
 		if ( s_hSteamDatagramTransportMutex == INVALID_HANDLE_VALUE ) // This is not actually threadsafe, but we assume that client code will call (and wait for the return of) some Init() call before invoking any API calls.
@@ -72,10 +101,10 @@ void SteamDatagramTransportLock::Lock()
 	#else
 		s_steamDatagramTransportMutex.lock();
 	#endif
-	OnLocked();
+	OnLocked( pszTag );
 }
 
-bool SteamDatagramTransportLock::TryLock( int msTimeout )
+bool SteamDatagramTransportLock::TryLock( const char *pszTag, int msTimeout )
 {
 	#ifdef MSVC_STL_MUTEX_WORKAROUND
 		if ( ::WaitForSingleObject( s_hSteamDatagramTransportMutex, msTimeout ) != WAIT_OBJECT_0 )
@@ -84,12 +113,14 @@ bool SteamDatagramTransportLock::TryLock( int msTimeout )
 		if ( !s_steamDatagramTransportMutex.try_lock_for( std::chrono::milliseconds( msTimeout ) ) )
 			return false;
 	#endif
-	OnLocked();
+	OnLocked( pszTag );
 	return true;
 }
 
 void SteamDatagramTransportLock::Unlock()
 {
+	char tags[ 256 ];
+
 	AssertHeldByCurrentThread();
 	SteamNetworkingMicroseconds usecElapsedTooLong = 0;
 	if ( s_nLocked == 1 )
@@ -104,7 +135,35 @@ void SteamDatagramTransportLock::Unlock()
 		// off.  They could have hit a breakpoint, and we don't want to create a bunch
 		// of confusing spew with spurious asserts
 		if ( usecElapsedTooLong < s_usecLongLockWarningThreshold || Plat_IsInDebugSession() )
+		{
 			usecElapsedTooLong = 0;
+		}
+		else
+		{
+			char *p = tags;
+			char *end = tags + sizeof(tags) - 1;
+			for ( int i = 0 ; i < s_nCurrentLockTags && p+5 < end ; ++i )
+			{
+				if ( p > tags )
+					*(p++) = ',';
+
+				const char *tag = s_pszCurrentLockTags[ i ];
+				int taglen = std::min( int(end-p), (int)V_strlen( tag ) );
+				memcpy( p, tag, taglen );
+				p += taglen;
+
+				if ( s_nCurrentLockTagCounts[i] > 1 )
+				{
+					int l = end-p;
+					if ( l <= 5 )
+						break;
+					p += V_snprintf( p, l, "(x%d)", s_nCurrentLockTagCounts[i] );
+				}
+			}
+			*p = '\0';
+		}
+
+		s_nCurrentLockTags = 0;
 	}
 	--s_nLocked;
 	#ifdef MSVC_STL_MUTEX_WORKAROUND
@@ -114,12 +173,15 @@ void SteamDatagramTransportLock::Unlock()
 	#endif
 
 	// Yelp if we held the lock for longer than the threshold.
-	AssertMsg1( usecElapsedTooLong == 0, "SteamDatagramTransportLock held for %.1fms!", usecElapsedTooLong*1e-3 );
+	if ( usecElapsedTooLong != 0 )
+	{
+		SpewWarning( "SteamDatagramTransportLock held for %.1fms.  (Performance warning).  %s", usecElapsedTooLong*1e-3, tags );
+	}
 }
 
-void SteamDatagramTransportLock::SetLongLockWarningThresholdMS( int msWarningThreshold )
+void SteamDatagramTransportLock::SetLongLockWarningThresholdMS( const char *pszTag, int msWarningThreshold )
 {
-	AssertHeldByCurrentThread();
+	AssertHeldByCurrentThread( pszTag );
 	SteamNetworkingMicroseconds usecWarningThreshold = SteamNetworkingMicroseconds{msWarningThreshold}*1000;
 	if ( s_usecLongLockWarningThreshold < usecWarningThreshold )
 		s_usecLongLockWarningThreshold = usecWarningThreshold;
@@ -129,6 +191,19 @@ void SteamDatagramTransportLock::AssertHeldByCurrentThread()
 {
 	Assert( s_nLocked > 0 ); // NOTE: This could succeed even if another thread has the lock
 	Assert( s_threadIDLockOwner == std::this_thread::get_id() );
+}
+
+void SteamDatagramTransportLock::AssertHeldByCurrentThread( const char *pszTag )
+{
+	Assert( s_nLocked > 0 ); // NOTE: This could succeed even if another thread has the lock
+	if ( s_threadIDLockOwner == std::this_thread::get_id() )
+	{
+		AddTag( pszTag );
+	}
+	else
+	{
+		AssertMsg1( false, "Lock not held.  %s", pszTag );
+	}
 }
 
 static void SeedWeakRandomGenerator()
@@ -192,6 +267,10 @@ public:
 	inline bool BReallySendRawPacket( int nChunks, const iovec *pChunks, const netadr_t &adrTo ) const
 	{
 		Assert( m_socket != INVALID_SOCKET );
+
+		// Add a tag.  If we end up holding the lock for a long time, this tag
+		// will tell us how many packets were sent
+		SteamDatagramTransportLock::AddTag( "SendUDPacket" );
 
 		// Convert address to BSD interface
 		struct sockaddr_storage destAddress;
@@ -260,6 +339,8 @@ public:
 
 	void LagPacket( bool bSend, const CRawUDPSocketImpl *pSock, const netadr_t &adr, int msDelay, int nChunks, const iovec *pChunks )
 	{
+		SteamDatagramTransportLock::AssertHeldByCurrentThread( "LagPacket" );
+
 		int cbPkt = 0;
 		for ( int i = 0 ; i < nChunks ; ++i )
 			cbPkt += pChunks[i].iov_len;
@@ -418,8 +499,10 @@ private:
 static CPacketLagger s_packetLagQueue;
 
 /// Object used to wake our background thread efficiently
-#ifdef WIN32
+#if defined( _WIN32 )
 	static HANDLE s_hEventWakeThread = INVALID_HANDLE_VALUE;
+#elif defined( NN_NINTENDO_SDK )
+	static int s_hEventWakeThread = INVALID_SOCKET;
 #else
 	static SOCKET s_hSockWakeThreadRead = INVALID_SOCKET;
 	static SOCKET s_hSockWakeThreadWrite = INVALID_SOCKET;
@@ -429,9 +512,12 @@ static std::thread *s_pThreadSteamDatagram = nullptr;
 
 static void WakeSteamDatagramThread()
 {
-	#ifdef _WIN32
+	#if defined( _WIN32 )
 		if ( s_hEventWakeThread != INVALID_HANDLE_VALUE )
 			SetEvent( s_hEventWakeThread );
+	#elif defined( NN_NINTENDO_SDK )
+		// Sorry, but this code is covered under NDA with Nintendo, and
+		// we don't have permission to distribute it.
 	#else
 		if ( s_hSockWakeThreadWrite != INVALID_SOCKET )
 		{
@@ -493,7 +579,7 @@ bool IRawUDPSocket::BSendRawPacketGather( int nChunks, const iovec *pChunks, con
 
 void IRawUDPSocket::Close()
 {
-	SteamDatagramTransportLock::AssertHeldByCurrentThread();
+	SteamDatagramTransportLock::AssertHeldByCurrentThread( "IRawUDPSocket::Close" );
 	CRawUDPSocketImpl *self = static_cast<CRawUDPSocketImpl *>( this );
 
 	/// Clear the callback, to ensure that no further callbacks will be executed.
@@ -532,6 +618,9 @@ static SOCKET OpenUDPSocketBoundToSockAddr( const void *sockaddr, size_t len, St
 	#ifdef LINUX
 		sockType |= SOCK_CLOEXEC;
 	#endif
+	#if defined( NN_NINTENDO_SDK ) && !defined( _WIN32 )
+		sockType |= SOCK_NONBLOCK;
+	#endif
 
 	// Try to create a UDP socket using the specified family
 	SOCKET sock = socket( inaddr->sin_family, sockType, IPPROTO_UDP );
@@ -542,13 +631,15 @@ static SOCKET OpenUDPSocketBoundToSockAddr( const void *sockaddr, size_t len, St
 	}
 
 	// We always use nonblocking IO
-	opt = 1;
-	if ( ioctlsocket( sock, FIONBIO, (unsigned long*)&opt ) == -1 )
-	{
-		V_sprintf_safe( errMsg, "Failed to set socket nonblocking mode.  Error code 0x%08x.", GetLastSocketError() );
-		closesocket( sock );
-		return INVALID_SOCKET;
-	}
+	#if !defined( NN_NINTENDO_SDK ) || defined( _WIN32 )
+		opt = 1;
+		if ( ioctlsocket( sock, FIONBIO, (unsigned long*)&opt ) == -1 )
+		{
+			V_sprintf_safe( errMsg, "Failed to set socket nonblocking mode.  Error code 0x%08x.", GetLastSocketError() );
+			closesocket( sock );
+			return INVALID_SOCKET;
+		}
+	#endif
 
 	// Set buffer sizes
 	opt = g_nSteamDatagramSocketBufferSize;
@@ -617,7 +708,7 @@ static CRawUDPSocketImpl *OpenRawUDPSocketInternal( CRecvPacketCallback callback
 {
 	// Creating a socket *should* be fast, but sometimes the OS might need to do some work.
 	// We shouldn't do this too often, give it a little extra time.
-	SteamDatagramTransportLock::SetLongLockWarningThresholdMS( 100 );
+	SteamDatagramTransportLock::SetLongLockWarningThresholdMS( "OpenRawUDPSocketInternal", 100 );
 
 	// Make sure have been initialized
 	if ( s_nLowLevelSupportRefCount <= 0 )
@@ -826,9 +917,15 @@ static bool PollRawUDPSockets( int nMaxTimeoutMS )
 		#endif
 	}
 
-	#ifdef _WIN32
+	#if defined( _WIN32 )
 		Assert( s_hEventWakeThread != NULL && s_hEventWakeThread != INVALID_HANDLE_VALUE );
 		pEvents[ nEvents++ ] = s_hEventWakeThread;
+	#elif defined( NN_NINTENDO_SDK )
+		Assert( s_hEventWakeThread != INVALID_SOCKET );
+		pollfd *p = &pPollFDs[ nPollFDs++ ];
+		p->fd = s_hEventWakeThread;
+		p->events = POLLRDNORM;
+		p->revents = 0;
 	#else
 		Assert( s_hSockWakeThreadRead != INVALID_SOCKET );
 		pollfd *p = &pPollFDs[ nPollFDs++ ];
@@ -863,7 +960,7 @@ static bool PollRawUDPSockets( int nMaxTimeoutMS )
 
 		// Try to acquire the lock.  But don't wait forever, in case the other thread has the lock
 		// and then makes a shutdown request while we're waiting on the lock here.
-		if ( SteamDatagramTransportLock::TryLock( 250 ) )
+		if ( SteamDatagramTransportLock::TryLock( "ServiceThread", 250 ) )
 			break;
 
 		// The only time this really should happen is a relatively rare race condition
@@ -909,8 +1006,13 @@ static bool PollRawUDPSockets( int nMaxTimeoutMS )
 			// Wake request are relatively rare, and we don't want to skip any
 			// or combine them.  That would result in complicated race conditions
 			// where we stay asleep a lot longer than we should.
-			Assert( pPollFDs[idx].fd == s_hSockWakeThreadRead );
-			::recv( s_hSockWakeThreadRead, buf, sizeof(buf), 0 );
+			#ifdef NN_NINTENDO_SDK
+				// Sorry, but this code is covered under NDA with Nintendo, and
+				// we don't have permission to distribute it.
+			#else
+				Assert( pPollFDs[idx].fd == s_hSockWakeThreadRead );
+				::recv( s_hSockWakeThreadRead, buf, sizeof(buf), 0 );
+			#endif
 			continue;
 		}
 		CRawUDPSocketImpl *pSock = pSocketsToPoll[ idx ];
@@ -943,6 +1045,10 @@ static bool PollRawUDPSockets( int nMaxTimeoutMS )
 			// be handled/reported in the same way as any other bogus packet.)
 			if ( ret < 0 )
 				break;
+
+			// Add a tag.  If we end up holding the lock for a long time, this tag
+			// will tell us how many packets were processed
+			SteamDatagramTransportLock::AddTag( "RecvUDPPacket" );
 
 			// Check for simulating random packet loss
 			if ( RandomBoolWithOdds( g_Config_FakePacketLoss_Recv.Get() ) )
@@ -1254,7 +1360,7 @@ static void SteamDatagramThreadProc()
 	DbgVerify( SetThreadPriority( GetCurrentThread(), THREAD_PRIORITY_HIGHEST ) );
 	#endif
 
-	#if defined(_WIN32) && !defined(GNU_COMPILER)
+	#if defined(_WIN32) && !defined(__GNUC__)
 		typedef struct tagTHREADNAME_INFO
 		{
 			DWORD dwType;
@@ -1291,7 +1397,7 @@ static void SteamDatagramThreadProc()
 	{
 		if ( !g_bWantThreadRunning )
 			return;
-	} while ( !SteamDatagramTransportLock::TryLock( 10 ) );
+	} while ( !SteamDatagramTransportLock::TryLock( "ServiceThread", 10 ) );
 
 	// Random number generator may be per thread!  Make sure and see it for
 	// this thread, if so
@@ -1410,7 +1516,7 @@ static bool BEnsureSteamDatagramThreadRunning( SteamDatagramErrMsg &errMsg )
 
 	// Create thread communication object used to wake the background thread efficiently
 	// in case a thinker priority changes or we want to shutdown
-	#ifdef WIN32
+	#if defined( _WIN32 )
 		Assert( s_hEventWakeThread == INVALID_HANDLE_VALUE );
 
 		// Note: Using "automatic reset" style event.
@@ -1421,6 +1527,9 @@ static bool BEnsureSteamDatagramThreadRunning( SteamDatagramErrMsg &errMsg )
 			V_sprintf_safe( errMsg, "CreateEvent() call failed.  Error code 0x%08x.", GetLastError() );
 			return false;
 		}
+	#elif defined( NN_NINTENDO_SDK )
+		// Sorry, but this code is covered under NDA with Nintendo, and
+		// we don't have permission to distribute it.
 	#else
 		Assert( s_hSockWakeThreadRead == INVALID_SOCKET );
 		Assert( s_hSockWakeThreadWrite == INVALID_SOCKET );
@@ -1482,12 +1591,15 @@ static void StopSteamDatagramThread()
 	}
 
 	// Destory wake communication objects
-	#ifdef WIN32
+	#if defined( _WIN32 )
 		if ( s_hEventWakeThread != INVALID_HANDLE_VALUE )
 		{
 			CloseHandle( s_hEventWakeThread );
 			s_hEventWakeThread = INVALID_HANDLE_VALUE;
 		}
+	#elif defined( NN_NINTENDO_SDK )
+		// Sorry, but this code is covered under NDA with Nintendo, and
+		// we don't have permission to distribute it.
 	#else
 		if ( s_hSockWakeThreadRead != INVALID_SOCKET )
 		{
@@ -1738,9 +1850,9 @@ void ReallySpewType( ESteamNetworkingSocketsDebugOutputType eType, const char *p
 }
 
 #ifdef STEAMNETWORKINGSOCKETS_STANDALONELIB
-static SpewRetval_t SDRSpewFunc( SpewType_t type, tchar const *pMsg )
+static SpewRetval_t SDRSpewFunc( SpewType_t type, char const *pMsg )
 {
-	V_StripTrailingWhitespaceASCII( const_cast<tchar*>( pMsg ) );
+	V_StripTrailingWhitespaceASCII( const_cast<char*>( pMsg ) );
 
 	switch ( type )
 	{
@@ -1794,16 +1906,34 @@ bool BSteamNetworkingSocketsLowLevelAddRef( SteamDatagramErrMsg &errMsg )
 
 		// Give us a extra time here.  This is a one-time init function and the OS might
 		// need to load up libraries and stuff.
-		SteamDatagramTransportLock::SetLongLockWarningThresholdMS( 500 );
+		SteamDatagramTransportLock::SetLongLockWarningThresholdMS( "BSteamNetworkingSocketsLowLevelAddRef", 500 );
 
-		// Init sockets
+		// Initialize COM
+		#ifdef _XBOX_ONE
+		{
+			HRESULT hr = ::CoInitializeEx( nullptr, COINIT_MULTITHREADED );
+			if ( !SUCCEEDED( hr ) )
+			{
+				V_sprintf_safe( errMsg, "CoInitializeEx returned %x", hr );
+				return false;
+			}
+		}
+		#endif
+
+		// Initialize sockets
 		#ifdef _WIN32
+		{
+			#pragma comment( lib, "ws2_32.lib" )
 			WSAData wsaData;
 			if ( ::WSAStartup( MAKEWORD(2, 2), &wsaData ) != 0 ) 
 			{
+				#ifdef _XBOX_ONE
+					::CoUninitialize();
+				#endif
 				V_strcpy_safe( errMsg, "WSAStartup failed" );
 				return false;
 			}
+		}
 		#endif
 
 		// Latch Steam codebase's logging system so we get spew and asserts
@@ -1844,7 +1974,7 @@ void SteamNetworkingSocketsLowLevelDecRef()
 	// There is a potential race condition / deadlock with the service thread,
 	// that might cause us to have to wait for it to timeout.  And the OS
 	// might need to do stuff when we close a bunch of sockets (and WSACleanup)
-	SteamDatagramTransportLock::SetLongLockWarningThresholdMS( 500 );
+	SteamDatagramTransportLock::SetLongLockWarningThresholdMS( "SteamNetworkingSocketsLowLevelDecRef", 500 );
 
 	if ( s_vecRawSockets.IsEmpty() )
 	{
@@ -1864,9 +1994,12 @@ void SteamNetworkingSocketsLowLevelDecRef()
 	Assert( s_vecRawSocketsPendingDeletion.IsEmpty() );
 	s_vecRawSocketsPendingDeletion.Purge();
 
-	// Nuke sockets
+	// Nuke sockets and COM
 	#ifdef _WIN32
 		::WSACleanup();
+	#endif
+	#ifdef _XBOX_ONE
+		::CoUninitialize();
 	#endif
 }
 

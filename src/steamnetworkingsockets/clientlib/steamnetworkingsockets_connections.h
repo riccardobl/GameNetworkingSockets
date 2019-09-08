@@ -132,16 +132,7 @@ struct SendPacketContext : SendPacketContext_t
 		return true;
 	}
 
-	void CalcMaxEncryptedPayloadSize( size_t cbHdrReserve )
-	{
-		Assert( m_cbTotalSize >= 0 );
-		m_cbMaxEncryptedPayload = k_cbSteamNetworkingSocketsMaxUDPMsgLen - (int)cbHdrReserve - m_cbTotalSize;
-		if ( m_cbMaxEncryptedPayload < 512 )
-		{
-			AssertMsg2( m_cbMaxEncryptedPayload < 512, "%s is really big (%d bytes)!", msg.GetTypeName().c_str(), m_cbTotalSize );
-		}
-	}
-
+	void CalcMaxEncryptedPayloadSize( size_t cbHdrReserve, CSteamNetworkConnectionBase *pConnection );
 };
 
 /////////////////////////////////////////////////////////////////////////////
@@ -265,6 +256,8 @@ public:
 protected:
 	CSteamNetworkListenSocketBase( CSteamNetworkingSockets *pSteamNetworkingSocketsInterface );
 	virtual ~CSteamNetworkListenSocketBase(); // hidden destructor, don't call directly.  Use Destroy()
+
+	bool BInitListenSocketCommon( int nOptions, const SteamNetworkingConfigValue_t *pOptions, SteamDatagramErrMsg &errMsg );
 };
 
 /////////////////////////////////////////////////////////////////////////////
@@ -388,6 +381,10 @@ public:
 	/// The listen socket through which we were accepted, if any.
 	CSteamNetworkListenSocketBase *m_pParentListenSocket;
 
+	/// Was this connection initiated locally (we are the "client") or remotely (we are the "server")?
+	/// In *most* use cases, "server" cnonections have a listen socket, but not always.
+	bool m_bConnectionInitiatedRemotely;
+
 	/// Our handle in our parent's m_listAcceptedConnections (if we were accepted on a listen socket)
 	int m_hSelfInParentListenSocketMap;
 
@@ -413,6 +410,14 @@ public:
 
 	/// Connection configuration
 	ConnectionConfig m_connectionConfig;
+
+	/// MTU values for this connection
+	int m_cbMTUPacketSize = 0;
+	int m_cbMaxPlaintextPayloadSend = 0;
+	int m_cbMaxMessageNoFragment = 0;
+	int m_cbMaxReliableMessageSegment = 0;
+
+	void UpdateMTUFromConfig();
 
 	/// Expand the packet number and decrypt a data chunk.
 	/// Returns the full 64-bit packet number, or 0 on failure.
@@ -459,12 +464,15 @@ public:
 	/// sent successfully, false if there was a problem.  This will call SendEncryptedDataChunk to do the work
 	bool SNP_SendPacket( SendPacketContext_t &ctx );
 
+	/// Called to (maybe) post a callback
+	virtual void PostConnectionStateChangedCallback( ESteamNetworkingConnectionState eOldAPIState, ESteamNetworkingConnectionState eNewAPIState );
+
 protected:
 	CSteamNetworkConnectionBase( CSteamNetworkingSockets *pSteamNetworkingSocketsInterface );
 	virtual ~CSteamNetworkConnectionBase(); // hidden destructor, don't call directly.  Use Destroy()
 
 	/// Initialize connection bookkeeping
-	bool BInitConnection( SteamNetworkingMicroseconds usecNow, SteamDatagramErrMsg &errMsg );
+	bool BInitConnection( SteamNetworkingMicroseconds usecNow, int nOptions, const SteamNetworkingConfigValue_t *pOptions, SteamDatagramErrMsg &errMsg );
 
 	/// Called from BInitConnection, to start obtaining certs, etc
 	virtual void InitConnectionCrypto( SteamNetworkingMicroseconds usecNow );
@@ -533,9 +541,6 @@ protected:
 
 	/// Called when the state changes
 	virtual void ConnectionStateChanged( ESteamNetworkingConnectionState eOldState );
-
-	/// Called to (maybe) post a callback
-	virtual void PostConnectionStateChangedCallback( ESteamNetworkingConnectionState eOldAPIState, ESteamNetworkingConnectionState eNewAPIState );
 
 	/// Return true if we are currently able to send end-to-end messages.
 	virtual bool BCanSendEndToEndConnectRequest() const = 0;
@@ -716,6 +721,7 @@ public:
 	virtual EResult _APISendMessageToConnection( const void *pData, uint32 cbData, int nSendFlags ) override;
 	virtual void ConnectionStateChanged( ESteamNetworkingConnectionState eOldState ) override;
 	virtual void PostConnectionStateChangedCallback( ESteamNetworkingConnectionState eOldAPIState, ESteamNetworkingConnectionState eNewAPIState ) override;
+	virtual void InitConnectionCrypto( SteamNetworkingMicroseconds usecNow ) override;
 	virtual EUnsignedCert AllowRemoteUnsignedCert() override;
 	virtual EUnsignedCert AllowLocalUnsignedCert() override;
 	virtual void GetConnectionTypeDescription( ConnectionTypeDescription_t &szDescription ) const override;
@@ -730,6 +736,15 @@ private:
 	void FakeSendStats( SteamNetworkingMicroseconds usecNow, int cbPktSize );
 };
 
+// Had to delay this until CSteamNetworkConnectionBase was defined
+template<typename TStatsMsg>
+inline void SendPacketContext<TStatsMsg>::CalcMaxEncryptedPayloadSize( size_t cbHdrReserve, CSteamNetworkConnectionBase *pConnection )
+{
+	Assert( m_cbTotalSize >= 0 );
+	m_cbMaxEncryptedPayload = pConnection->m_cbMTUPacketSize - (int)cbHdrReserve - m_cbTotalSize;
+	Assert( m_cbMaxEncryptedPayload >= 0 );
+}
+
 /////////////////////////////////////////////////////////////////////////////
 //
 // Misc globals
@@ -740,8 +755,14 @@ extern CUtlHashMap<uint16, CSteamNetworkConnectionBase *, std::equal_to<uint16>,
 extern CUtlHashMap<int, CSteamNetworkListenSocketBase *, std::equal_to<int>, Identity<int> > g_mapListenSockets;
 
 extern bool BCheckGlobalSpamReplyRateLimit( SteamNetworkingMicroseconds usecNow );
-extern CSteamNetworkConnectionBase *FindConnectionByLocalID( uint32 nLocalConnectionID );
-extern HSteamListenSocket AddListenSocket( CSteamNetworkListenSocketBase *pSock );
+extern CSteamNetworkConnectionBase *GetConnectionByHandle( HSteamNetConnection sock );
+
+inline CSteamNetworkConnectionBase *FindConnectionByLocalID( uint32 nLocalConnectionID )
+{
+	// We use the wire connection ID as the API handle, so these two operations
+	// are currently the same.
+	return GetConnectionByHandle( HSteamNetConnection( nLocalConnectionID ) );
+}
 
 } // namespace SteamNetworkingSocketsLib
 

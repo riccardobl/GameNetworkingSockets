@@ -86,13 +86,19 @@ public:
 	/// - eScope: Onto what type of object are you applying the setting?
 	/// - scopeArg: Which object you want to change?  (Ignored for global scope).  E.g. connection handle, listen socket handle, interface pointer, etc.
 	/// - eDataType: What type of data is in the buffer at pValue?  This must match the type of the variable exactly!
-	/// - pArg: Value to set it to.  You can pass NULL to remove a non-global sett at this scope,
+	/// - pArg: Value to set it to.  You can pass NULL to remove a non-global setting at this scope,
 	///   causing the value for that object to use global defaults.  Or at global scope, passing NULL
 	///   will reset any custom value and restore it to the system default.
 	///   NOTE: When setting callback functions, do not pass the function pointer directly.
 	///   Your argument should be a pointer to a function pointer.
 	virtual bool SetConfigValue( ESteamNetworkingConfigValue eValue, ESteamNetworkingConfigScope eScopeType, intptr_t scopeObj,
 		ESteamNetworkingConfigDataType eDataType, const void *pArg ) = 0;
+
+	/// Set a configuration value, using a struct to pass the value.
+	/// (This is just a convenience shortcut; see below for the implementation and
+	/// a little insight into how SteamNetworkingConfigValue_t is used when
+	/// setting config options during listen socket and connection creation.)
+	bool SetConfigValueStruct( const SteamNetworkingConfigValue_t &opt, ESteamNetworkingConfigScope eScopeType, intptr_t scopeObj );
 
 	/// Get a configuration value.
 	/// - eValue: which value to fetch
@@ -135,7 +141,13 @@ protected:
 
 	// Steamworks SDK
 	inline ISteamNetworkingUtils *SteamNetworkingUtils();
-	STEAM_DEFINE_INTERFACE_ACCESSOR( ISteamNetworkingUtils *, SteamNetworkingUtils, SteamInternal_FindOrCreateUserInterface( 0, STEAMNETWORKINGUTILS_INTERFACE_VERSION ) );
+	STEAM_DEFINE_INTERFACE_ACCESSOR( ISteamNetworkingUtils *, SteamNetworkingUtils,
+		/* Prefer user version of the interface.  But if it isn't found, then use
+		gameserver one.  Yes, this is a completely terrible hack */
+		SteamInternal_FindOrCreateUserInterface( 0, STEAMNETWORKINGUTILS_INTERFACE_VERSION ) ?
+		SteamInternal_FindOrCreateUserInterface( 0, STEAMNETWORKINGUTILS_INTERFACE_VERSION ) :
+		SteamInternal_FindOrCreateGameServerInterface( 0, STEAMNETWORKINGUTILS_INTERFACE_VERSION )
+	)
 #endif
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -148,8 +160,15 @@ inline bool ISteamNetworkingUtils::SetGlobalConfigValueString( ESteamNetworkingC
 inline bool ISteamNetworkingUtils::SetConnectionConfigValueInt32( HSteamNetConnection hConn, ESteamNetworkingConfigValue eValue, int32 val ) { return SetConfigValue( eValue, k_ESteamNetworkingConfig_Connection, hConn, k_ESteamNetworkingConfig_Int32, &val ); }
 inline bool ISteamNetworkingUtils::SetConnectionConfigValueFloat( HSteamNetConnection hConn, ESteamNetworkingConfigValue eValue, float val ) { return SetConfigValue( eValue, k_ESteamNetworkingConfig_Connection, hConn, k_ESteamNetworkingConfig_Float, &val ); }
 inline bool ISteamNetworkingUtils::SetConnectionConfigValueString( HSteamNetConnection hConn, ESteamNetworkingConfigValue eValue, const char *val ) { return SetConfigValue( eValue, k_ESteamNetworkingConfig_Connection, hConn, k_ESteamNetworkingConfig_String, val ); }
+inline bool ISteamNetworkingUtils::SetConfigValueStruct( const SteamNetworkingConfigValue_t &opt, ESteamNetworkingConfigScope eScopeType, intptr_t scopeObj )
+{
+	// Locate the argument.  Strings are a special case, since the
+	// "value" (the whole string buffer) doesn't fit in the struct
+	const void *pVal = ( opt.m_eDataType == k_ESteamNetworkingConfig_String ) ? (const void *)opt.m_val.m_string : (const void *)&opt.m_val;
+	return SetConfigValue( opt.m_eValue, eScopeType, scopeObj, opt.m_eDataType, pVal );
+}
 
-#if !defined( STEAMNETWORKINGSOCKETS_STATIC_LINK ) && defined( STEAMNETWORKINGSOCKETS_STEAM )
+#if !defined( STEAMNETWORKINGSOCKETS_STATIC_LINK ) && defined( STEAMNETWORKINGSOCKETS_STEAMCLIENT )
 inline void SteamNetworkingIPAddr::ToString( char *buf, size_t cbBuf, bool bWithPort ) const { SteamNetworkingUtils()->SteamNetworkingIPAddr_ToString( *this, buf, cbBuf, bWithPort ); }
 inline bool SteamNetworkingIPAddr::ParseString( const char *pszStr ) { return SteamNetworkingUtils()->SteamNetworkingIPAddr_ParseString( this, pszStr ); }
 inline void SteamNetworkingIdentity::ToString( char *buf, size_t cbBuf ) const { SteamNetworkingUtils()->SteamNetworkingIdentity_ToString( *this, buf, cbBuf ); }

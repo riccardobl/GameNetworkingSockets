@@ -22,6 +22,8 @@
 
 class ISteamNetworkingSocketsCallbacks;
 struct SteamNetAuthenticationStatus_t;
+class ISteamNetworkingConnectionCustomSignaling;
+class ISteamNetworkingCustomSignalingRecvContext;
 
 //-----------------------------------------------------------------------------
 /// Lower level networking interface that more closely mirrors the standard
@@ -46,15 +48,20 @@ public:
 	/// You must select a specific local port to listen on and set it
 	/// the port field of the local address.
 	///
-	/// Usually you wil set the IP portion of the address to zero, (SteamNetworkingIPAddr::Clear()).
-	/// This means that you will not bind to any particular local interface.  In addition,
-	/// if possible the socket will be bound in "dual stack" mode, which means that it can
-	/// accept both IPv4 and IPv6 clients.  If you wish to bind a particular interface, then
-	/// set the local address to the appropriate IPv4 or IPv6 IP.
+	/// Usually you will set the IP portion of the address to zero (SteamNetworkingIPAddr::Clear()).
+	/// This means that you will not bind to any particular local interface (i.e. the same
+	/// as INADDR_ANY in plain socket code).  Furthermore, if possible the socket will be bound
+	/// in "dual stack" mode, which means that it can accept both IPv4 and IPv6 client connections.
+	/// If you really do wish to bind a particular interface, then set the local address to the
+	/// appropriate IPv4 or IPv6 IP.
+	///
+	/// If you need to set any initial config options, pass them here.  See
+	/// SteamNetworkingConfigValue_t for more about why this is preferable to
+	/// setting the options "immediately" after creation.
 	///
 	/// When a client attempts to connect, a SteamNetConnectionStatusChangedCallback_t
 	/// will be posted.  The connection will be in the connecting state.
-	virtual HSteamListenSocket CreateListenSocketIP( const SteamNetworkingIPAddr &localAddress ) = 0;
+	virtual HSteamListenSocket CreateListenSocketIP( const SteamNetworkingIPAddr &localAddress, int nOptions, const SteamNetworkingConfigValue_t *pOptions ) = 0;
 
 	/// Creates a connection and begins talking to a "server" over UDP at the
 	/// given IPv4 or IPv6 address.  The remote host must be listening with a
@@ -74,7 +81,11 @@ public:
 	/// distributed through some other out-of-band mechanism), you don't have any
 	/// way of knowing who is actually on the other end, and thus are vulnerable to
 	/// man-in-the-middle attacks.
-	virtual HSteamNetConnection ConnectByIPAddress( const SteamNetworkingIPAddr &address ) = 0;
+	///
+	/// If you need to set any initial config options, pass them here.  See
+	/// SteamNetworkingConfigValue_t for more about why this is preferable to
+	/// setting the options "immediately" after creation.
+	virtual HSteamNetConnection ConnectByIPAddress( const SteamNetworkingIPAddr &address, int nOptions, const SteamNetworkingConfigValue_t *pOptions ) = 0;
 
 #ifdef STEAMNETWORKINGSOCKETS_ENABLE_SDR
 	/// P2P stfuf
@@ -113,6 +124,12 @@ public:
 	/// Returns k_EResultInvalidState if the connection is not in the appropriate state.
 	/// (Remember that the connection state could change in between the time that the
 	/// notification being posted to the queue and when it is received by the application.)
+	///
+	/// A note about connection configuration options.  If you need to set any configuration
+	/// options that are common to all connections accepted through a particular listen
+	/// socket, consider setting the options on the listen socket, since such options are
+	/// inherited automatically.  If you really do need to set options that are connection
+	/// specific, it is safe to set them on the connection before accepting the connection.
 	virtual EResult AcceptConnection( HSteamNetConnection hConn ) = 0;
 
 	/// Disconnects from the remote host and invalidates the connection handle.
@@ -325,8 +342,25 @@ public:
 	virtual ESteamNetworkingAvailability GetAuthenticationStatus( SteamNetAuthenticationStatus_t *pDetails ) = 0;
 
 #ifdef STEAMNETWORKINGSOCKETS_ENABLE_SDR
-	/// Dedicated servers ervers hosted in known data centers
+	// Dedicated servers hosted in known data centers
+	// Relayed connections using custom signaling protocol
 #endif // #ifndef STEAMNETWORKINGSOCKETS_ENABLE_SDR
+
+/// Certificate provision by the application.  (On Steam, Steam will handle all this automatically)
+#ifndef STEAMNETWORKINGSOCKETS_STEAM
+
+	/// Get blob that describes a certificate request.  You can send this to your game coordinator.
+	/// Upon entry, *pcbBlob should contain the size of the buffer.  On successful exit, it will
+	/// return the number of bytes that were populated.  You can pass pBlob=NULL to query for the required
+	/// size.  (256 bytes is a very conservative estimate.)
+	///
+	/// Pass this blob to your game coordinator and call SteamDatagram_CreateCert.
+	virtual bool GetCertificateRequest( int *pcbBlob, void *pBlob, SteamNetworkingErrMsg &errMsg ) = 0;
+
+	/// Set the certificate.  The certificate blob should be the output of
+	/// SteamDatagram_CreateCert.
+	virtual bool SetCertificate( const void *pCertificate, int cbCertificate, SteamNetworkingErrMsg &errMsg ) = 0;
+#endif
 
 	// Invoke all callbacks queued for this interface.
 	// On Steam, callbacks are dispatched via the ordinary Steamworks callbacks mechanism.
@@ -338,7 +372,7 @@ public:
 protected:
 	~ISteamNetworkingSockets(); // Silence some warnings
 };
-#define STEAMNETWORKINGSOCKETS_INTERFACE_VERSION "SteamNetworkingSockets003"
+#define STEAMNETWORKINGSOCKETS_INTERFACE_VERSION "SteamNetworkingSockets005"
 
 extern "C" {
 
@@ -427,6 +461,8 @@ struct SteamNetConnectionStatusChangedCallback_t
 /// - The list of trusted CA certificates that might be relevant for this
 ///   app.
 /// - A valid certificate issued by a CA.
+///
+/// This callback is posted whenever the state of our readiness changes.
 struct SteamNetAuthenticationStatus_t
 { 
 	enum { k_iCallback = k_iSteamNetworkingSocketsCallbacks + 2 };

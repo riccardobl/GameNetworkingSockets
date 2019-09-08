@@ -1,13 +1,8 @@
-//===== Copyright 1996-2005, Valve Corporation, All rights reserved. ======//
-//
-// $Header: $
-// $NoKeywords: $
-//
-// Serialization buffer
-//===========================================================================//
+//===== Copyright Valve Corporation, All rights reserved. ======//
 
-#ifndef _XBOX
+#ifdef _MSC_VER
 #pragma warning (disable : 4514)
+#pragma warning (disable : 4706)
 #endif
 
 #include <stdio.h>
@@ -921,8 +916,6 @@ bool CUtlBuffer::SeekGet( SeekType_t type, int offset )
 // Parse...
 //-----------------------------------------------------------------------------
 
-#pragma warning ( disable : 4706 )
-
 int CUtlBuffer::VaScanf( const char* pFmt, va_list list )
 {
 	Assert( pFmt );
@@ -1090,8 +1083,6 @@ int CUtlBuffer::VaScanf( const char* pFmt, va_list list )
 	}
 	return numScanned;
 }
-
-#pragma warning ( default : 4706 )
 
 int CUtlBuffer::Scanf( const char* pFmt, ... )
 {

@@ -118,89 +118,80 @@
 	#define IsDebug() false
 #endif
 
-#ifdef _WIN32
+#if defined( _XBOX_ONE )
+	#define IsXboxOne() true
+	#define IsConsole() true
+#elif defined( NN_NINTENDO_SDK )
+	#if !defined(POSIX) && !defined(_WIN32)
+		#define POSIX
+	#endif
+	#define IsNintendoSwitch() true
+	#define IsConsole() true
+#elif defined( _WIN32 )
 	#define IsWindows() true
-	#define IsPosix() false
-	#define IsLinux() false
-	#define IsOSX() false
-	#define IsPS3() false
-	#define IsX360() false
-	#ifndef _XBOX
-		#define IsPC() true
-		#define IsConsole() false
-		#define IsXbox() false
-	#else
-		#ifndef _CONSOLE
-			#define _CONSOLE
-		#endif
-		#define IsPC() false
-		#define IsConsole() true
-		#define IsXbox() true
-	#endif
-	#define IsARM() false
-	#define IsAndroid() false
-
-#elif defined( _PS3 )
-	#define IsWindows() false
-	#define IsPC() false
-	#define IsConsole() true
-	#define IsXbox() false
-	#define IsLinux() false
-	#define IsPosix() true
-	#define IsOSX() false
-	#define IsPS3() true
-	#define IsX360() false
-	#define IsARM() false
-	#define IsAndroid() false
-	#ifndef _CONSOLE
-		#define _CONSOLE
-	#endif
-
-#elif defined( _X360 )
-	#define IsWindows() false
-	#define IsPC() false
-	#define IsConsole() true
-	#define IsXbox() false
-	#define IsLinux() false
-	#define IsPosix() false
-	#define IsOSX() false
-	#define IsPS3() false
-	#define IsX360() true
-	#define IsARM() false
-	#define IsAndroid() false
-
-#elif defined(POSIX)
-	#define IsWindows() false
 	#define IsPC() true
-	#define IsConsole() false
-	#define IsXbox() false
+#elif defined( _PS3 )
+	#define IsConsole() true
 	#define IsPosix() true
-#if defined(LINUX)
-	#define IsLinux() true
+	#define IsPS3() true
+#elif defined(POSIX)
+	#define IsPC() true
+	#define IsPosix() true
+	#ifdef LINUX
+		#define IsLinux() true
+	#endif
+	#ifdef OSX
+		#define SUPPORTS_IOPOLLINGHELPER
+		#define IsOSX() true
+	#endif
 #else
-	#define IsLinux() false
-#endif
-#if defined(OSX)
-	#define SUPPORTS_IOPOLLINGHELPER
-	#define IsOSX() true
-#else
-	#define IsOSX() false
-#endif
-	#define IsPS3() false
-	#define IsX360() false
-#if defined(__arm__)
-	#define IsARM() true
-#else
-	#define IsARM() false
-#endif
-#if defined(ANDROID)
-	#define IsAndroid() true
-#else
-	#define IsAndroid() false
+	#error Undefined platform
 #endif
 
-#else
-#error Undefined platform
+#ifndef IsWindows
+	#define IsWindows() false
 #endif
+#ifndef IsPC
+	#define IsPC() false
+#endif
+#ifndef IsConsole
+	#define IsConsole() false
+#endif
+#ifndef IsNintendoSwitch
+	#define IsNintendoSwitch() false
+#endif
+#ifndef IsXboxOne
+	#define IsXboxOne() false
+#endif
+#ifndef IsLinux
+	#define IsLinux() false
+#endif
+#ifndef IsPosix
+	#define IsPosix() false
+#endif
+#ifndef IsOSX
+	#define IsOSX() false
+#endif
+#ifndef IsPS3
+	#define IsPS3() false
+#endif
+#ifndef IsX360
+	#define IsX360() false
+#endif
+#ifndef IsARM
+	#ifdef __arm__
+		#define IsARM() true
+	#else
+		#define IsARM() false
+	#endif
+#endif
+#ifndef IsAndroid
+	#ifdef ANDROID
+		#define IsAndroid() true
+	#else
+		#define IsAndroid() false
+	#endif
+#endif
+
 
 #endif // #ifndef MINBASE_IDENTIFY_H

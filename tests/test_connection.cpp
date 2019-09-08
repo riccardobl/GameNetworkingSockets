@@ -74,7 +74,8 @@ static void InitSteamDatagramConnectionSockets()
 	#else
 		//SteamAPI_Init();
 
-		SteamDatagramClient_SetAppIDAndUniverse( 570, k_EUniverseDev ); // Just set something, doesn't matter what
+		SteamDatagramClient_SetAppID( 570 ); // Just set something, doesn't matter what
+		//SteamDatagramClient_SetUniverse( k_EUniverseDev );
 
 		SteamDatagramErrMsg errMsg;
 		if ( !SteamDatagramClient_Init( true, errMsg ) )
@@ -344,7 +345,7 @@ static TestSteamNetworkingSocketsCallbacks g_Callbacks;
 
 static void PumpCallbacks()
 {
-	#ifndef STEAMNETWORKINGSOCKETS_OPENSOURCE
+	#ifdef STEAMNETWORKINGSOCKETS_STEAM
 		SteamAPI_RunCallbacks();
 	#endif
 	SteamNetworkingSockets()->RunCallbacks( &g_Callbacks );
@@ -544,8 +545,8 @@ static void RunSteamDatagramConnectionTest()
 	//}
 
 	// Initiate connection
-	g_hSteamListenSocket = pSteamSocketNetworking->CreateListenSocketIP( bindServerAddress );
-	g_peerClient.m_hSteamNetConnection = pSteamSocketNetworking->ConnectByIPAddress( connectToServerAddress );
+	g_hSteamListenSocket = pSteamSocketNetworking->CreateListenSocketIP( bindServerAddress, 0, nullptr );
+	g_peerClient.m_hSteamNetConnection = pSteamSocketNetworking->ConnectByIPAddress( connectToServerAddress, 0, nullptr );
 	pSteamSocketNetworking->SetConnectionName( g_peerClient.m_hSteamNetConnection, "Client" );
 
 //	// Send a few random message, before we get connected, just to test that case
@@ -636,3 +637,7 @@ int main(  )
 	ShutdownSteamDatagramConnectionSockets();
 	return 0;
 }
+
+#ifdef NN_NINTENDO_SDK
+extern "C" void nnMain() { main(); }
+#endif
