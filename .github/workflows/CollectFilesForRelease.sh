@@ -13,12 +13,12 @@ fi
 
 if [ "$EXAMPLES_PATH" = "" ];
 then
-  export EXAMPLES_PATH=$PWD/examples
+  export EXAMPLES_PATH=$PWD/dist_examples
 fi
 
 if [ "$TESTS_PATH" = "" ];
 then
-  export TESTS_PATH=$PWD/tests 
+  export TESTS_PATH=$PWD/dist_tests 
 fi
 
 if [ "$OUT_PATH" = "" ];
@@ -28,7 +28,7 @@ fi
 
 if [ "$HEADERS_PATH" = "" ];
 then
-  export HEADERS_PATH=$PWD/headers
+  export HEADERS_PATH=$PWD/dist_headers
 fi
 
 mkdir -p $DIST_PATH
