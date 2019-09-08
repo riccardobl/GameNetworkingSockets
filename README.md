@@ -1,4 +1,4 @@
-[![Build Status](https://travis-ci.org/riccardobl/GameNetworkingSockets.svg?branch=master)](https://travis-ci.org/riccardobl/GameNetworkingSockets)
+[![Build Status](https://github.com/riccardobl/GameNetworkingSockets/workflows/Build/badge.svg)](https://github.com/riccardobl/GameNetworkingSockets/actions)
 
 x64 builds available on the [release page](https://github.com/riccardobl/GameNetworkingSockets/releases) 
 
