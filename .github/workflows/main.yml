@@ -1,0 +1,146 @@
+name: Build GameNetworkingSockets
+on: 
+  push:
+  pull_request:
+  release:
+    types: [published]
+jobs:
+
+  BuildWindows:
+    name: Build on Windows
+    runs-on: windows-2019    
+    steps:
+    - uses: actions/checkout@master
+       
+    - name: Install Dependencies
+      run: |
+        choco install msys2 7zip
+        set PATH=C:\tools\msys64\usr\bin;%PATH%
+        pacman -S --disable-download-timeout --noconfirm git  mingw-w64-x86_64-gcc mingw-w64-x86_64-cmake mingw-w64-x86_64-openssl mingw-w64-x86_64-pkg-config mingw-w64-x86_64-ninja
+        set PATH=C:\tools\msys64\usr\bin;C:\tools\msys64\mingw64\bin;%PATH%
+        echo "Build protobuf..."
+        git clone https://github.com/google/protobuf 
+        cd protobuf
+        git checkout -t origin/3.5.x
+        mkdir cmake_build
+        cd cmake_build
+        cmake -G Ninja -DCMAKE_BUILD_TYPE=Release  -DCMAKE_POSITION_INDEPENDENT_CODE=ON  -Dprotobuf_BUILD_TESTS=OFF -Dprotobuf_BUILD_SHARED_LIBS=ON -DCMAKE_INSTALL_PREFIX=%cd%\..\..\protobuf-amd64 ../cmake 
+        ninja
+        ninja install
+        cd ../../
+        
+    - name: Build
+      run: |
+       mkdir build
+       cd build
+       set PATH=%cd%\..\protobuf-amd64\bin;C:\tools\msys64\usr\bin;C:\tools\msys64\mingw64\bin;%PATH%
+       echo Path %PATH%
+       cmake -G Ninja  -DCMAKE_BUILD_TYPE=Release  -DProtobuf_INCLUDE_DIR=%cd%\..\protobuf-amd64\include -DProtobuf_LIBRARY=%cd%\..\protobuf-amd64\bin\libprotobuf.dll  -DProtobuf_USE_STATIC_LIBS=false  ..
+       ninja
+       
+    - name: Collect files
+      shell: bash
+      run: |   
+        export LIBRARY_EXT=dll
+        chmod +x ./.github/workflows/CollectFilesForRelease.sh
+        ./.github/workflows/CollectFilesForRelease.sh
+        
+    - uses: riccardobl-mirrors/upload-to-release@master
+      if: github.event_name == 'release' && github.event.action == 'published'
+      with:
+        name: examples-GameNetworkingSockets-windows.zip
+        path: "out/examples.zip"
+        repo-token: ${{ secrets.GITHUB_TOKEN }}    
+    
+    - uses: riccardobl-mirrors/upload-to-release@master
+      if: github.event_name == 'release' && github.event.action == 'published'
+      with:
+        name: tests-GameNetworkingSockets-windows.zip
+        path: "out/tests.zip"
+        repo-token: ${{ secrets.GITHUB_TOKEN }}
+        
+    - uses: riccardobl-mirrors/upload-to-release@master
+      if: github.event_name == 'release' && github.event.action == 'published'
+      with:
+        name: GameNetworkingSockets-windows.zip
+        path: "out/lib.zip"
+        repo-token: ${{ secrets.GITHUB_TOKEN }}
+               
+    - uses: riccardobl-mirrors/upload-to-release@master
+      if: github.event_name == 'release' && github.event.action == 'published'      
+      with:
+        name: headers-GameNetworkingSockets.zip
+        path: "out/headers.zip"
+        repo-token: ${{ secrets.GITHUB_TOKEN }}               
+                      
+  BuildLinux:
+    name: Build on linux
+    runs-on: ubuntu-18.04
+    steps:
+    - uses: actions/checkout@master
+    
+    - name: Clone
+      run: git clone https://github.com/ValveSoftware/GameNetworkingSockets.git
+      
+    - name: Install Dependencies
+      run: |
+        sudo apt update
+        sudo apt install -y libssl-dev ninja-build p7zip-full
+        echo "Build protobuf"
+        git clone https://github.com/google/protobuf
+        cd protobuf
+        git checkout -t origin/3.5.x
+        mkdir cmake_build 
+        cd cmake_build
+        cmake -G Ninja -DCMAKE_BUILD_TYPE=Release  -DCMAKE_POSITION_INDEPENDENT_CODE=ON  -Dprotobuf_BUILD_TESTS=OFF -Dprotobuf_BUILD_SHARED_LIBS=ON -DCMAKE_INSTALL_PREFIX=$PWD/../../protobuf-amd64 ../cmake
+        ninja
+        ninja install
+        cd ../../
+        
+    - name: Build
+      run: |
+        mkdir -p build
+        cd build
+        export PATH="$PATH:$PWD/../protobuf-amd64/bin";
+        export LD_LIBRARY_PATH="$LD_LIBRARY_PATH:$PWD/../protobuf-amd64/lib/"
+        cmake -G Ninja  -DCMAKE_BUILD_TYPE=Release  -DProtobuf_INCLUDE_DIR=$PWD/../protobuf-amd64/include -DProtobuf_LIBRARY=$PWD/../protobuf-amd64/lib/libprotobuf.so -DProtobuf_USE_STATIC_LIBS=false ..
+        ninja        
+       
+    - name: Collect files
+      shell: bash
+      run: |   
+        export LIBRARY_EXT=so
+        chmod +x ./.github/workflows/CollectFilesForRelease.sh
+        ./.github/workflows/CollectFilesForRelease.sh
+        
+    - uses: riccardobl-mirrors/upload-to-release@master
+      if: github.event_name == 'release' && github.event.action == 'published'
+      with:
+        name: examples-GameNetworkingSockets-linux.zip
+        path: "out/examples.zip"
+        repo-token: ${{ secrets.GITHUB_TOKEN }}    
+    
+    - uses: riccardobl-mirrors/upload-to-release@master
+      if: github.event_name == 'release' && github.event.action == 'published'
+      with:
+        name: tests-GameNetworkingSockets-linux.zip
+        path: "out/tests.zip"
+        repo-token: ${{ secrets.GITHUB_TOKEN }}
+        
+    - uses: riccardobl-mirrors/upload-to-release@master
+      if: github.event_name == 'release' && github.event.action == 'published'
+      with:
+        name: GameNetworkingSockets-linux.zip
+        path: "out/lib.zip"
+        repo-token: ${{ secrets.GITHUB_TOKEN }}
+               
+    - uses: riccardobl-mirrors/upload-to-release@master
+      if: github.event_name == 'release' && github.event.action == 'published'      
+      with:
+        name: headers-GameNetworkingSockets.zip
+        path: "out/headers.zip"
+        repo-token: ${{ secrets.GITHUB_TOKEN }}             
+                       
+
+    
+
